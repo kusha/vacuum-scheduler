@@ -79,6 +79,7 @@ class VacuumScheduler(hass.Hass):
         
         # im-memory state
         self.clear_queue()
+        self.clear_force_clean()  # on app restart all run_at(s) are lost!
         
         # subscribe to changes
         # to trigger cleaning while home is empty:
@@ -179,8 +180,19 @@ class VacuumScheduler(hass.Hass):
         
         # for each next force clean schedule attempt
         for room, clean_time in clean_later.items():
+            # check is run_at is already scheduled to the same moment
+            current_force_clean_time = self.get_force_clean_time(room)
+            
+            # if it is in the past OR it is in the future and new one is sooner
+            # let's schedule (reversed)
+            if (current_force_clean_time is not None) and \
+                    current_force_clean_time > datetime.now() and \
+                    current_force_clean_time < clean_time:
+                self.log(f"Skipping scheduling of force clean of {room} - already scheduled at {current_force_clean_time}")
+                continue
             self.log(f"Scheduling force clean of {room} at {clean_time}")
-            self.run_at(self.attempt_force_clean, clean_time)
+            self.set_force_clean_time(room, clean_time)
+            self.run_at(self.attempt_force_clean, clean_time)  # recursive !
         
         # start cleaning of rooms now
         # TODO: order by how long are we delayed
@@ -258,6 +270,34 @@ class VacuumScheduler(hass.Hass):
             attributes = {"clean_history": clean_history}
         )
     
+    def get_force_clean_time(self, room):
+        force_clean_schedule = self.get_state(STATE_SENSOR, attribute="force_clean_schedule")
+        if force_clean_schedule is None:
+            return None
+        if room not in force_clean_schedule:
+            return None
+        if force_clean_schedule[room] is None:
+            return None
+        return datetime.fromisoformat(force_clean_schedule[room])
+
+    def set_force_clean_time(self, room, value):
+        force_clean_schedule = self.get_state(STATE_SENSOR, attribute="force_clean_schedule")
+        if force_clean_schedule is None:
+            force_clean_schedule = {}
+        force_clean_schedule[room] = value.isoformat() if value is not None else None
+        self.set_state(
+            STATE_SENSOR,
+            state = STATE_SENSOR_VALUE,
+            attributes = {"force_clean_schedule": force_clean_schedule}
+        )
+    
+    def clear_force_clean(self):
+        self.set_state(
+            STATE_SENSOR,
+            state = STATE_SENSOR_VALUE,
+            attributes = {"force_clean_schedule": {}}
+        )
+
     @property
     def current_room(self):
         # return None if no room
@@ -276,6 +316,8 @@ class VacuumScheduler(hass.Hass):
         queue = self.get_state(STATE_SENSOR, attribute="queue")
         if queue is None:
             queue = []
+        if room in [queue_item["room"] for queue_item in queue]:
+            self.log(f"Skipping addition of {room} to queue")
         queue.append({
             "room": room,
             "force": force
@@ -305,9 +347,3 @@ class VacuumScheduler(hass.Hass):
             state = STATE_SENSOR_VALUE,
             attributes = {"queue": []}
         )
-        
-
-
-
-
-
